@@ -1,0 +1,200 @@
+import telebot
+from datetime import datetime
+import pytz
+
+BOT_TOKEN = "8677858964:AAH3Y7Z2j7bj-vEaSojneK4Byr8qUeVl4Hc"
+bot = telebot.TeleBot(BOT_TOKEN)
+
+CHAT_ID = -1002599963619
+DISCUSSION_TOPIC = 20972
+QUERY_TOPIC = 5210
+
+IST = pytz.timezone('Asia/Kolkata')
+user_queries = {}
+
+NSE_HOLIDAYS = [
+    "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26",
+    "2026-03-31", "2026-04-03", "2026-04-14", "2026-05-01",
+    "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02",
+    "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
+]
+
+def get_current_ist():
+    return datetime.now(IST)
+
+def is_market_open_today():
+    today = get_current_ist()
+    date_str = today.strftime("%Y-%m-%d")
+    if today.weekday() in [5, 6]:
+        return False
+    if date_str in NSE_HOLIDAYS:
+        return False
+    return True
+
+def is_within_query_time():
+    now = get_current_ist()
+    hour = now.hour
+    minute = now.minute
+    current_time_minutes = hour * 60 + minute
+    start_time_minutes = 0
+    end_time_minutes = 15 * 60 + 30
+    return start_time_minutes <= current_time_minutes <= end_time_minutes
+
+def get_current_week_start():
+    """Returns the Monday of current week"""
+    today = get_current_ist()
+    days_since_monday = today.weekday()
+    week_start = today - __import__('datetime').timedelta(days=days_since_monday)
+    return week_start.strftime("%Y-%m-%d")
+
+def get_current_month():
+    """Returns current month in YYYY-MM format"""
+    today = get_current_ist()
+    return today.strftime("%Y-%m")
+
+def has_query_this_week(user_id):
+    """Check if user already asked a query this week"""
+    week_start = get_current_week_start()
+    if user_id not in user_queries:
+        return False
+    return user_queries[user_id].get("week_start") == week_start and user_queries[user_id].get("week_count", 0) >= 1
+
+def has_monthly_quota(user_id):
+    """Check if user has exhausted monthly quota of 2"""
+    current_month = get_current_month()
+    if user_id not in user_queries:
+        return True
+    
+    user_month = user_queries[user_id].get("month")
+    month_count = user_queries[user_id].get("month_count", 0)
+    
+    if user_month != current_month:
+        return True
+    
+    return month_count < 2
+
+def record_query(user_id):
+    """Record a query for the user"""
+    current_month = get_current_month()
+    week_start = get_current_week_start()
+    
+    if user_id not in user_queries:
+        user_queries[user_id] = {}
+    
+    current_data = user_queries[user_id]
+    
+    if current_data.get("month") != current_month:
+        current_data["month"] = current_month
+        current_data["month_count"] = 1
+    else:
+        current_data["month_count"] = current_data.get("month_count", 0) + 1
+    
+    if current_data.get("week_start") != week_start:
+        current_data["week_start"] = week_start
+        current_data["week_count"] = 1
+    else:
+        current_data["week_count"] = current_data.get("week_count", 0) + 1
+    
+    user_queries[user_id] = current_data
+
+@bot.message_handler(func=lambda message: '#query' in message.text.lower() and message.message_thread_id == DISCUSSION_TOPIC)
+def handle_query(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name
+    
+    print(f"\n🔍 Caught #query from @{username}")
+    
+    if not is_market_open_today():
+        try:
+            bot.send_message(
+                CHAT_ID,
+                f"📅 @{username} - Query sessions are only on market trading days!\nPlease post your query on the next trading day.",
+                message_thread_id=DISCUSSION_TOPIC,
+                reply_to_message_id=message.message_id
+            )
+            print(f"⚠️ Market closed today - rejected query from @{username}")
+        except Exception as e:
+            print(f"Error: {e}")
+        return
+    
+    if not is_within_query_time():
+        try:
+            bot.send_message(
+                CHAT_ID,
+                f"⏰ @{username} - Query time window has closed!\nQueries are accepted from 12:00 AM to 3:30 PM IST only.\nPlease ask your query tomorrow.",
+                message_thread_id=DISCUSSION_TOPIC,
+                reply_to_message_id=message.message_id
+            )
+            print(f"⏰ Outside query hours - rejected query from @{username}")
+        except Exception as e:
+            print(f"Error: {e}")
+        return
+    
+    if not has_monthly_quota(user_id):
+        try:
+            bot.send_message(
+                CHAT_ID,
+                f"📊 @{username} - Your monthly quota of 2 queries is exhausted!\nQuota resets on the 1st of next month.",
+                message_thread_id=DISCUSSION_TOPIC,
+                reply_to_message_id=message.message_id
+            )
+            print(f"📊 Monthly quota exhausted for @{username}")
+        except Exception as e:
+            print(f"Error: {e}")
+        return
+    
+    if has_query_this_week(user_id):
+        try:
+            current_month = get_current_month()
+            month_count = user_queries.get(user_id, {}).get("month_count", 0)
+            remaining_quota = 2 - month_count
+            
+            bot.send_message(
+                CHAT_ID,
+                f"⚠️ @{username} - You've already posted 1 query this week!\nYou can post again next week (Monday onwards).\n\n📊 Monthly quota remaining: {remaining_quota}/2",
+                message_thread_id=DISCUSSION_TOPIC,
+                reply_to_message_id=message.message_id
+            )
+            print(f"⚠️ Weekly limit exceeded for @{username}")
+        except Exception as e:
+            print(f"Error: {e}")
+        return
+    
+    query_text = message.text.replace("#query", "").replace("#Query", "").strip()
+    
+    forward_text = (
+        f"📌 **Query from @{username}**\n\n"
+        f"{query_text}"
+    )
+    
+    try:
+        print(f"   Sending to Query topic...")
+        bot.send_message(CHAT_ID, forward_text, message_thread_id=QUERY_TOPIC, parse_mode="Markdown")
+        print(f"   ✅ Sent to Query topic!")
+        
+        record_query(user_id)
+        print(f"✅ Successfully processed query: {query_text[:50]}...\n")
+        
+    except Exception as e:
+        print(f"❌ ERROR: {e}\n")
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, "🤖 ChartRoom Query Bot is active!")
+
+@bot.message_handler(commands=['stats'])
+def stats(message):
+    current_month = get_current_month()
+    count = len([uid for uid, data in user_queries.items() if data.get("month") == current_month])
+    bot.reply_to(message, f"📊 Queries received this month: {count}")
+
+print("🚀 ChartRoom Query Bot is running...")
+print(f"Chat ID: {CHAT_ID}")
+print(f"Discussion Topic: {DISCUSSION_TOPIC}")
+print(f"Query Topic: {QUERY_TOPIC}")
+print(f"Query Window: 12:00 AM to 3:30 PM IST")
+print(f"Monthly Quota: 2 queries per person")
+print(f"Weekly Limit: Max 1 query per week (Mon-Fri)")
+print(f"Market Days Only (Mon-Fri, excluding NSE holidays)")
+print("="*60)
+bot.infinity_polling()
