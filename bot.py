@@ -60,7 +60,7 @@ def has_query_this_week(user_id):
     return user_queries[user_id].get("week_start") == week_start and user_queries[user_id].get("week_count", 0) >= 1
 
 def has_monthly_quota(user_id):
-    """Check if user has exhausted monthly quota of 2"""
+    """Check if user has exhausted monthly quota of 3"""
     current_month = get_current_month()
     if user_id not in user_queries:
         return True
@@ -71,7 +71,7 @@ def has_monthly_quota(user_id):
     if user_month != current_month:
         return True
     
-    return month_count < 2
+    return month_count < 3
 
 def record_query(user_id):
     """Record a query for the user"""
@@ -134,7 +134,7 @@ def handle_query(message):
         try:
             bot.send_message(
                 CHAT_ID,
-                f"📊 @{username} - Your monthly quota of 2 queries is exhausted!\nQuota resets on the 1st of next month.",
+                f"📊 @{username} - Your monthly quota of 3 queries is exhausted!\nQuota resets on the 1st of next month.",
                 message_thread_id=DISCUSSION_TOPIC,
                 reply_to_message_id=message.message_id
             )
@@ -147,11 +147,11 @@ def handle_query(message):
         try:
             current_month = get_current_month()
             month_count = user_queries.get(user_id, {}).get("month_count", 0)
-            remaining_quota = 2 - month_count
+            remaining_quota = 3 - month_count
             
             bot.send_message(
                 CHAT_ID,
-                f"⚠️ @{username} - You've already posted 1 query this week!\nYou can post again next week (Monday onwards).\n\n📊 Monthly quota remaining: {remaining_quota}/2",
+                f"⚠️ @{username} - You've already posted 1 query this week!\nYou can post again next week (Monday onwards).\n\n📊 Monthly quota remaining: {remaining_quota}/3",
                 message_thread_id=DISCUSSION_TOPIC,
                 reply_to_message_id=message.message_id
             )
@@ -193,7 +193,7 @@ print(f"Chat ID: {CHAT_ID}")
 print(f"Discussion Topic: {DISCUSSION_TOPIC}")
 print(f"Query Topic: {QUERY_TOPIC}")
 print(f"Query Window: 12:00 AM to 3:30 PM IST")
-print(f"Monthly Quota: 2 queries per person")
+print(f"Monthly Quota: 3 queries per person")
 print(f"Weekly Limit: Max 1 query per week (Mon-Fri)")
 print(f"Market Days Only (Mon-Fri, excluding NSE holidays)")
 print("="*60)
