@@ -41,8 +41,14 @@ def is_within_query_time():
     return start_time_minutes <= current_time_minutes <= end_time_minutes
 
 def get_current_week_start():
-    """Returns the Monday of current week"""
+    """Returns the 1st of month if today is 1st, otherwise returns Monday of current week"""
     today = get_current_ist()
+    
+    # If today is the 1st of the month, reset weekly quota as well
+    if today.day == 1:
+        return today.strftime("%Y-%m-01")
+    
+    # Otherwise, return Monday of current week
     days_since_monday = today.weekday()
     week_start = today - __import__('datetime').timedelta(days=days_since_monday)
     return week_start.strftime("%Y-%m-%d")
@@ -162,8 +168,12 @@ def handle_query(message):
     
     query_text = message.text.replace("#query", "").replace("#Query", "").strip()
     
+    # Record query first to get the correct count
+    record_query(user_id)
+    month_count = user_queries[user_id].get("month_count", 1)
+    
     forward_text = (
-        f"📌 **Query from @{username}**\n\n"
+        f"📌 **Query from @{username}** ({month_count}/3)\n\n"
         f"{query_text}"
     )
     
@@ -172,8 +182,7 @@ def handle_query(message):
         bot.send_message(CHAT_ID, forward_text, message_thread_id=QUERY_TOPIC, parse_mode="Markdown")
         print(f"   ✅ Sent to Query topic!")
         
-        record_query(user_id)
-        print(f"✅ Successfully processed query: {query_text[:50]}...\n")
+        print(f"✅ Successfully processed query: {query_text[:50]}... (Monthly: {month_count}/3)\n")
         
     except Exception as e:
         print(f"❌ ERROR: {e}\n")
