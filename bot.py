@@ -41,22 +41,11 @@ def is_within_query_time():
     return start_time_minutes <= current_time_minutes <= end_time_minutes
 
 def get_current_week_start():
-    """Returns the 1st of month if today is 1st, otherwise returns Monday of current week"""
+    """Returns Monday of current week (IST) as YYYY-MM-DD"""
     today = get_current_ist()
-    
-    # If today is the 1st of the month, reset weekly quota as well
-    if today.day == 1:
-        return today.strftime("%Y-%m-01")
-    
-    # Otherwise, return Monday of current week
     days_since_monday = today.weekday()
     week_start = today - __import__('datetime').timedelta(days=days_since_monday)
     return week_start.strftime("%Y-%m-%d")
-
-def get_current_month():
-    """Returns current month in YYYY-MM format"""
-    today = get_current_ist()
-    return today.strftime("%Y-%m")
 
 def has_query_this_week(user_id):
     """Check if user already asked a query this week"""
@@ -65,35 +54,14 @@ def has_query_this_week(user_id):
         return False
     return user_queries[user_id].get("week_start") == week_start and user_queries[user_id].get("week_count", 0) >= 1
 
-def has_monthly_quota(user_id):
-    """Check if user has exhausted monthly quota of 3"""
-    current_month = get_current_month()
-    if user_id not in user_queries:
-        return True
-    
-    user_month = user_queries[user_id].get("month")
-    month_count = user_queries[user_id].get("month_count", 0)
-    
-    if user_month != current_month:
-        return True
-    
-    return month_count < 3
-
 def record_query(user_id):
     """Record a query for the user"""
-    current_month = get_current_month()
     week_start = get_current_week_start()
     
     if user_id not in user_queries:
         user_queries[user_id] = {}
     
     current_data = user_queries[user_id]
-    
-    if current_data.get("month") != current_month:
-        current_data["month"] = current_month
-        current_data["month_count"] = 1
-    else:
-        current_data["month_count"] = current_data.get("month_count", 0) + 1
     
     if current_data.get("week_start") != week_start:
         current_data["week_start"] = week_start
@@ -136,28 +104,11 @@ def handle_query(message):
             print(f"Error: {e}")
         return
     
-    if not has_monthly_quota(user_id):
-        try:
-            bot.send_message(
-                CHAT_ID,
-                f"📊 @{username} - Your monthly quota of 3 queries is exhausted!\nQuota resets on the 1st of next month.",
-                message_thread_id=DISCUSSION_TOPIC,
-                reply_to_message_id=message.message_id
-            )
-            print(f"📊 Monthly quota exhausted for @{username}")
-        except Exception as e:
-            print(f"Error: {e}")
-        return
-    
     if has_query_this_week(user_id):
         try:
-            current_month = get_current_month()
-            month_count = user_queries.get(user_id, {}).get("month_count", 0)
-            remaining_quota = 3 - month_count
-            
             bot.send_message(
                 CHAT_ID,
-                f"⚠️ @{username} - You've already posted 1 query this week!\nYou can post again next week (Monday onwards).\n\n📊 Monthly quota remaining: {remaining_quota}/3",
+                f"⚠️ @{username} - You've already posted 1 query this week!\nYou can post again next week (Monday onwards).",
                 message_thread_id=DISCUSSION_TOPIC,
                 reply_to_message_id=message.message_id
             )
@@ -168,21 +119,20 @@ def handle_query(message):
     
     query_text = message.text.replace("#query", "").replace("#Query", "").strip()
     
-    # Record query first to get the correct count
-    record_query(user_id)
-    month_count = user_queries[user_id].get("month_count", 1)
-    
     forward_text = (
-        f"📌 **Query from @{username}** ({month_count}/3)\n\n"
+        f"📌 Query from @{username}\n\n"
         f"{query_text}"
     )
     
     try:
         print(f"   Sending to Query topic...")
-        bot.send_message(CHAT_ID, forward_text, message_thread_id=QUERY_TOPIC, parse_mode="Markdown")
+        bot.send_message(CHAT_ID, forward_text, message_thread_id=QUERY_TOPIC)
         print(f"   ✅ Sent to Query topic!")
         
-        print(f"✅ Successfully processed query: {query_text[:50]}... (Monthly: {month_count}/3)\n")
+        # Record only after a successful forward, so a failed send doesn't use up the weekly query
+        record_query(user_id)
+        
+        print(f"✅ Successfully processed query: {query_text[:50]}...\n")
         
     except Exception as e:
         print(f"❌ ERROR: {e}\n")
@@ -193,17 +143,17 @@ def start(message):
 
 @bot.message_handler(commands=['stats'])
 def stats(message):
-    current_month = get_current_month()
-    count = len([uid for uid, data in user_queries.items() if data.get("month") == current_month])
-    bot.reply_to(message, f"📊 Queries received this month: {count}")
+    week_start = get_current_week_start()
+    count = len([uid for uid, data in user_queries.items() if data.get("week_start") == week_start])
+    bot.reply_to(message, f"📊 Queries received this week: {count}")
 
 print("🚀 ChartRoom Query Bot is running...")
 print(f"Chat ID: {CHAT_ID}")
 print(f"Discussion Topic: {DISCUSSION_TOPIC}")
 print(f"Query Topic: {QUERY_TOPIC}")
 print(f"Query Window: 12:00 AM to 3:30 PM IST")
-print(f"Monthly Quota: 3 queries per person")
-print(f"Weekly Limit: Max 1 query per week (Mon-Fri)")
+print(f"Limit: 1 query per person per week (resets Monday)")
 print(f"Market Days Only (Mon-Fri, excluding NSE holidays)")
 print("="*60)
+bot.remove_webhook()
 bot.infinity_polling()
