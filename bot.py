@@ -1,6 +1,10 @@
 import os
+import json
+import time
+import threading
 import telebot
-from datetime import datetime
+from telebot import types
+from datetime import datetime, timedelta
 import pytz
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]  # set in Railway Variables
@@ -11,7 +15,6 @@ DISCUSSION_TOPIC = 20972
 QUERY_TOPIC = 5210
 
 IST = pytz.timezone('Asia/Kolkata')
-user_queries = {}
 
 NSE_HOLIDAYS = [
     "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26",
@@ -20,141 +23,248 @@ NSE_HOLIDAYS = [
     "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
 ]
 
+WINDOW_END_MINUTES = 15 * 60 + 30   # queries are taken 12:00 AM - 3:30 PM IST
+NOTE_LIFETIME = 60                  # rejection notes delete themselves after a minute
+OFFER_LIFETIME = 10 * 60            # "forward at the next window?" buttons expire
+
+# Weekly counts and saved queries live on a Railway volume so restarts don't reset them
+DB_FILE = "/app/data/query_bot_db.json" if os.path.isdir("/app/data") else "query_bot_db.json"
+lock = threading.Lock()
+offers = {}      # offer message id -> pending yes/no choice
+deletions = []   # (delete_at, message_id) of notes to remove
+
+
+def load_db():
+    try:
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    data.setdefault("user_queries", {})
+    data.setdefault("saved", [])
+    return data
+
+
+def save_db():
+    tmp = DB_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, DB_FILE)
+
+
+db = load_db()
+
+
 def get_current_ist():
     return datetime.now(IST)
 
-def is_market_open_today():
-    today = get_current_ist()
-    date_str = today.strftime("%Y-%m-%d")
-    if today.weekday() in [5, 6]:
-        return False
-    if date_str in NSE_HOLIDAYS:
-        return False
-    return True
 
-def is_within_query_time():
-    now = get_current_ist()
-    hour = now.hour
-    minute = now.minute
-    current_time_minutes = hour * 60 + minute
-    start_time_minutes = 0
-    end_time_minutes = 15 * 60 + 30
-    return start_time_minutes <= current_time_minutes <= end_time_minutes
+def is_trading_day(d):
+    return d.weekday() < 5 and d.strftime("%Y-%m-%d") not in NSE_HOLIDAYS
 
-def get_current_week_start():
-    """Returns Monday of current week (IST) as YYYY-MM-DD"""
-    today = get_current_ist()
-    days_since_monday = today.weekday()
-    week_start = today - __import__('datetime').timedelta(days=days_since_monday)
-    return week_start.strftime("%Y-%m-%d")
 
-def has_query_this_week(user_id):
-    """Check if user already asked a query this week"""
-    week_start = get_current_week_start()
-    if user_id not in user_queries:
-        return False
-    return user_queries[user_id].get("week_start") == week_start and user_queries[user_id].get("week_count", 0) >= 1
+def in_query_window(now):
+    return is_trading_day(now.date()) and now.hour * 60 + now.minute <= WINDOW_END_MINUTES
 
-def record_query(user_id):
-    """Record a query for the user"""
-    week_start = get_current_week_start()
-    
-    if user_id not in user_queries:
-        user_queries[user_id] = {}
-    
-    current_data = user_queries[user_id]
-    
-    if current_data.get("week_start") != week_start:
-        current_data["week_start"] = week_start
-        current_data["week_count"] = 1
-    else:
-        current_data["week_count"] = current_data.get("week_count", 0) + 1
-    
-    user_queries[user_id] = current_data
 
-@bot.message_handler(func=lambda message: '#query' in message.text.lower() and message.message_thread_id == DISCUSSION_TOPIC)
+def next_window_start(now):
+    """12:00 AM IST of the next trading day after today."""
+    d = now.date() + timedelta(days=1)
+    while not is_trading_day(d):
+        d += timedelta(days=1)
+    return IST.localize(datetime(d.year, d.month, d.day, 0, 0))
+
+
+def week_start_of(dt):
+    """Monday of dt's week as YYYY-MM-DD."""
+    return (dt.date() - timedelta(days=dt.weekday())).strftime("%Y-%m-%d")
+
+
+def has_query_in_week(user_id, week_start):
+    data = db["user_queries"].get(str(user_id), {})
+    return data.get("week_start") == week_start and data.get("week_count", 0) >= 1
+
+
+def record_query(user_id, week_start):
+    data = db["user_queries"].setdefault(str(user_id), {})
+    if data.get("week_start") != week_start:
+        data["week_start"] = week_start
+        data["week_count"] = 0
+    data["week_count"] = data.get("week_count", 0) + 1
+    save_db()
+
+
+def when_text(target, now):
+    if target.date() == now.date() + timedelta(days=1):
+        return f"12:00 AM tomorrow ({target.strftime('%A')})"
+    return f"12:00 AM on {target.strftime('%A')}"
+
+
+def send_note(message, text, lifetime=NOTE_LIFETIME, markup=None):
+    """Reply in Discussion; the note deletes itself after `lifetime` seconds."""
+    sent = bot.send_message(
+        CHAT_ID, text,
+        message_thread_id=DISCUSSION_TOPIC,
+        reply_to_message_id=message.message_id,
+        reply_markup=markup,
+    )
+    if lifetime:
+        with lock:
+            deletions.append((time.time() + lifetime, sent.message_id))
+    return sent
+
+
+def forward_query(username, query_text, saved_at=None):
+    text = f"📌 Query from @{username}\n\n{query_text}"
+    if saved_at:
+        text += f"\n\n(saved on {saved_at})"
+    # saved queries go out at midnight, so they arrive silently
+    bot.send_message(CHAT_ID, text, message_thread_id=QUERY_TOPIC, disable_notification=bool(saved_at))
+
+
+@bot.message_handler(func=lambda message: message.text and '#query' in message.text.lower() and message.message_thread_id == DISCUSSION_TOPIC)
 def handle_query(message):
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
-    
+    now = get_current_ist()
+    query_text = message.text.replace("#query", "").replace("#Query", "").replace("#QUERY", "").strip()
+
     print(f"\n🔍 Caught #query from @{username}")
-    
-    if not is_market_open_today():
-        try:
-            bot.send_message(
-                CHAT_ID,
-                f"📅 @{username} - Query sessions are only on market trading days!\nPlease post your query on the next trading day.",
-                message_thread_id=DISCUSSION_TOPIC,
-                reply_to_message_id=message.message_id
-            )
-            print(f"⚠️ Market closed today - rejected query from @{username}")
-        except Exception as e:
-            print(f"Error: {e}")
-        return
-    
-    if not is_within_query_time():
-        try:
-            bot.send_message(
-                CHAT_ID,
-                f"⏰ @{username} - Query time window has closed!\nQueries are accepted from 12:00 AM to 3:30 PM IST only.\nPlease ask your query tomorrow.",
-                message_thread_id=DISCUSSION_TOPIC,
-                reply_to_message_id=message.message_id
-            )
-            print(f"⏰ Outside query hours - rejected query from @{username}")
-        except Exception as e:
-            print(f"Error: {e}")
-        return
-    
-    if has_query_this_week(user_id):
-        try:
-            bot.send_message(
-                CHAT_ID,
-                f"⚠️ @{username} - You've already posted 1 query this week!\nYou can post again next week (Monday onwards).",
-                message_thread_id=DISCUSSION_TOPIC,
-                reply_to_message_id=message.message_id
-            )
-            print(f"⚠️ Weekly limit exceeded for @{username}")
-        except Exception as e:
-            print(f"Error: {e}")
-        return
-    
-    query_text = message.text.replace("#query", "").replace("#Query", "").strip()
-    
-    forward_text = (
-        f"📌 Query from @{username}\n\n"
-        f"{query_text}"
-    )
-    
+
+    open_now = in_query_window(now)
+    target = now if open_now else next_window_start(now)
+    week = week_start_of(target)
+
+    with lock:
+        already_saved = any(s["user_id"] == user_id and not s.get("sent") and s["target"] > now.timestamp()
+                            for s in db["saved"])
+        used_week = has_query_in_week(user_id, week)
+
     try:
-        print(f"   Sending to Query topic...")
-        bot.send_message(CHAT_ID, forward_text, message_thread_id=QUERY_TOPIC)
-        print(f"   ✅ Sent to Query topic!")
-        
-        # Record only after a successful forward, so a failed send doesn't use up the weekly query
-        record_query(user_id)
-        
-        print(f"✅ Successfully processed query: {query_text[:50]}...\n")
-        
+        if already_saved:
+            send_note(message, "🙏 Your query is already saved and will reach Doc when the next window opens.")
+            return
+        if used_week:
+            send_note(message, "🙏 You've already used this week's query. Your next one opens on Monday.\n"
+                               "Meanwhile, #view stockname shows Doc's latest views.")
+            print(f"⚠️ Weekly limit reached for @{username}")
+            return
+        if open_now:
+            bot.send_message(CHAT_ID, f"📌 Query from @{username}\n\n{query_text}", message_thread_id=QUERY_TOPIC)
+            # Record only after a successful forward, so a failed send doesn't use up the weekly query
+            with lock:
+                record_query(user_id, week)
+            print(f"✅ Forwarded query: {query_text[:50]}...")
+            return
+
+        # Outside the window: ask whether to forward it when the next window opens
+        reason = ("Today's query window has closed (12:00 AM–3:30 PM on market days)."
+                  if is_trading_day(now.date()) else "Queries are taken on market days only.")
+        markup = types.InlineKeyboardMarkup()
+        markup.row(types.InlineKeyboardButton("✅ Yes, forward it", callback_data="qsave"),
+                   types.InlineKeyboardButton("No, thanks", callback_data="qskip"))
+        offer = send_note(message, f"🙏 {reason} Shall I forward this query to Doc at {when_text(target, now)}?",
+                          lifetime=OFFER_LIFETIME, markup=markup)
+        with lock:
+            offers[offer.message_id] = {"user_id": user_id, "username": username, "text": query_text,
+                                        "target": target.timestamp(), "asked": now.strftime("%d %b, %I:%M %p")}
+        print(f"🕒 Outside window - offered to save query from @{username}")
     except Exception as e:
         print(f"❌ ERROR: {e}\n")
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("qsave", "qskip"))
+def handle_offer_choice(call):
+    offer_id = call.message.message_id
+    with lock:
+        offer = offers.get(offer_id)
+    if not offer:
+        bot.answer_callback_query(call.id, "This option has expired.")
+        return
+    if call.from_user.id != offer["user_id"]:
+        bot.answer_callback_query(call.id, "🙏 Only the member who asked can choose this.")
+        return
+    with lock:
+        offers.pop(offer_id, None)
+    try:
+        if call.data == "qskip":
+            bot.answer_callback_query(call.id, "👍 No problem.")
+            bot.delete_message(CHAT_ID, offer_id)
+            return
+        target = datetime.fromtimestamp(offer["target"], IST)
+        week = week_start_of(target)
+        with lock:
+            if has_query_in_week(offer["user_id"], week):
+                text = "🙏 You've already used that week's query, so this one can't be saved."
+            else:
+                record_query(offer["user_id"], week)
+                db["saved"].append({"user_id": offer["user_id"], "username": offer["username"], "text": offer["text"],
+                                    "target": offer["target"], "asked": offer["asked"], "sent": False})
+                save_db()
+                text = f"✅ Done! Your query will be forwarded to Doc at {when_text(target, get_current_ist())}."
+            deletions.append((time.time() + NOTE_LIFETIME, offer_id))
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(text, CHAT_ID, offer_id)
+        print(f"💾 Query from @{offer['username']}: {text}")
+    except Exception as e:
+        print(f"❌ ERROR: {e}\n")
+
+
+def housekeeping():
+    """Every 20 s: forward saved queries that are due, and remove notes and offers whose time is up."""
+    while True:
+        try:
+            now_ts = time.time()
+            with lock:
+                due = [s for s in db["saved"] if not s.get("sent") and s["target"] <= now_ts]
+                to_delete = {mid for t, mid in deletions if t <= now_ts}
+                deletions[:] = [(t, mid) for t, mid in deletions if t > now_ts]
+            for s in due:
+                forward_query(s["username"], s["text"], saved_at=s["asked"])
+                with lock:
+                    s["sent"] = True
+                    db["saved"] = [x for x in db["saved"] if not x.get("sent") or now_ts - x["target"] < 7 * 86400]
+                    save_db()
+                print(f"📤 Forwarded saved query from @{s['username']}")
+            for mid in to_delete:
+                with lock:
+                    offers.pop(mid, None)
+                try:
+                    bot.delete_message(CHAT_ID, mid)
+                except Exception:
+                    pass  # already deleted
+        except Exception as e:
+            print(f"❌ Housekeeping error: {e}")
+        time.sleep(20)
+
 
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.reply_to(message, "🤖 ChartRoom Query Bot is active!")
 
+
 @bot.message_handler(commands=['stats'])
 def stats(message):
-    week_start = get_current_week_start()
-    count = len([uid for uid, data in user_queries.items() if data.get("week_start") == week_start])
-    bot.reply_to(message, f"📊 Queries received this week: {count}")
+    week_start = week_start_of(get_current_ist())
+    count = len([uid for uid, data in db["user_queries"].items() if data.get("week_start") == week_start])
+    pending = len([s for s in db["saved"] if not s.get("sent")])
+    bot.reply_to(message, f"📊 Queries this week: {count}\n💾 Saved for the next window: {pending}")
 
-print("🚀 ChartRoom Query Bot is running...")
-print(f"Chat ID: {CHAT_ID}")
-print(f"Discussion Topic: {DISCUSSION_TOPIC}")
-print(f"Query Topic: {QUERY_TOPIC}")
-print(f"Query Window: 12:00 AM to 3:30 PM IST")
-print(f"Limit: 1 query per person per week (resets Monday)")
-print(f"Market Days Only (Mon-Fri, excluding NSE holidays)")
-print("="*60)
-bot.remove_webhook()
-bot.infinity_polling()
+
+def main():
+    print("🚀 ChartRoom Query Bot is running...")
+    print(f"Chat ID: {CHAT_ID}")
+    print(f"Discussion Topic: {DISCUSSION_TOPIC}")
+    print(f"Query Topic: {QUERY_TOPIC}")
+    print(f"Query Window: 12:00 AM to 3:30 PM IST")
+    print(f"Limit: 1 query per person per week (resets Monday)")
+    print(f"Market Days Only (Mon-Fri, excluding NSE holidays); late queries can be saved for the next window")
+    print(f"DB file: {DB_FILE} ({len(db['user_queries'])} members, {len([s for s in db['saved'] if not s.get('sent')])} saved queries)")
+    print("="*60)
+    threading.Thread(target=housekeeping, daemon=True).start()
+    bot.remove_webhook()
+    bot.infinity_polling(allowed_updates=["message", "callback_query"])
+
+
+if __name__ == "__main__":
+    main()
