@@ -136,13 +136,18 @@ def handle_query(message):
     week = week_start_of(target)
 
     with lock:
-        already_saved = any(s["user_id"] == user_id and not s.get("sent") and s["target"] > now.timestamp()
-                            for s in db["saved"])
+        saved = next((s for s in db["saved"] if s["user_id"] == user_id and not s.get("sent")
+                      and s["target"] > now.timestamp()), None)
         used_week = has_query_in_week(user_id, week)
 
     try:
-        if already_saved:
-            send_note(message, "🙏 Your query is already saved and will reach Doc when the next window opens.")
+        if saved:
+            what = " ".join(saved["text"].split())
+            what = (what[:30].rstrip() + "…") if len(what) > 30 else what
+            day = datetime.fromtimestamp(saved["target"], IST)
+            day = f"tomorrow ({day.strftime('%A')})" if day.date() == now.date() + timedelta(days=1) else day.strftime("%A")
+            send_note(message, f"🙏 You've already saved one query ({what}) for {day}. "
+                               f"It's 1 query per week, so this one can't be added.")
             return
         if used_week:
             send_note(message, "🙏 You've already used this week's query. Your next one opens on Monday.\n"
