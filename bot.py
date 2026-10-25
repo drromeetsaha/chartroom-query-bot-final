@@ -1,8 +1,9 @@
+import os
 import telebot
 from datetime import datetime
 import pytz
 
-BOT_TOKEN = "8677858964:AAH3Y7Z2j7bj-vEaSojneK4Byr8qUeVl4Hc"
+BOT_TOKEN = os.environ["BOT_TOKEN"]  # set in Railway Variables
 bot = telebot.TeleBot(BOT_TOKEN)
 
 CHAT_ID = -1002599963619
