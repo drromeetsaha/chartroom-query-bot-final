@@ -1,4 +1,5 @@
 import os
+import re
 import html
 import json
 import time
@@ -138,7 +139,25 @@ def forward_query(username, query_text, saved_at=None, user_id=None):
         remember_forward(sent, user_id, username, query_text)
 
 
-@bot.message_handler(func=lambda message: message.text and '#query' in message.text.lower() and message.message_thread_id == DISCUSSION_TOPIC)
+# "#query" used as advice, not as a query: "Pls use #query stock name", "Try #query mcx", "#query krke dalo"
+INSTRUCTION_RE = re.compile(r"\b(use|try|post|ask|pls|please|plz|via|through|bhejo|dalo|daalo)\s+(?:in\s+|at\s+|on\s+|it\s+)?#query\b"
+                            r"|#query\s+(?:karo|kro|krke|karke|kar\s+ke|kar\s+do|me|mein|pe|topic)\b", re.I)
+
+
+def is_real_query(message):
+    """Doc never asks queries (his "#query" is always advice to a member); members' advice to each other is skipped too."""
+    if message.from_user.id == DOC_ID:
+        return False
+    replying_to_member = (message.reply_to_message is not None and message.reply_to_message.from_user is not None
+                          and message.reply_to_message.from_user.id not in (message.from_user.id, DOC_ID)  # replies to Doc are real queries
+                          and message.reply_to_message.message_id != DISCUSSION_TOPIC)
+    if replying_to_member and INSTRUCTION_RE.search(message.text):
+        return False
+    return True
+
+
+@bot.message_handler(func=lambda message: message.text and '#query' in message.text.lower()
+                     and message.message_thread_id == DISCUSSION_TOPIC and is_real_query(message))
 def handle_query(message):
     user_id = message.from_user.id
     # "@username" when the member has one; otherwise their first name (an "@Ravi" would tag nobody)
