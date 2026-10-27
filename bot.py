@@ -7,6 +7,7 @@ import telebot
 from telebot import types
 from datetime import datetime, timedelta
 import pytz
+from stock_tags import tags as stock_tags
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]  # set in Railway Variables
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -117,10 +118,11 @@ def send_note(message, text, lifetime=NOTE_LIFETIME, markup=None):
     return sent
 
 
-def remember_forward(sent, user_id, username):
-    """Keeps who asked each forwarded query for 30 days, so the member can be tagged under Doc's reply."""
+def remember_forward(sent, user_id, username, query_text=""):
+    """Keeps who asked each forwarded query (and which stock) for 30 days, so the member can be tagged under Doc's reply."""
     with lock:
-        db["forwarded"][str(sent.message_id)] = {"user_id": user_id, "name": username, "ts": time.time()}
+        db["forwarded"][str(sent.message_id)] = {"user_id": user_id, "name": username, "ts": time.time(),
+                                                 "tags": stock_tags(query_text)}
         cut = time.time() - 30 * 86400
         db["forwarded"] = {k: v for k, v in db["forwarded"].items() if v["ts"] > cut}
         save_db()
@@ -133,7 +135,7 @@ def forward_query(username, query_text, saved_at=None, user_id=None):
     # saved queries go out at midnight, so they arrive silently
     sent = bot.send_message(CHAT_ID, text, message_thread_id=QUERY_TOPIC, disable_notification=bool(saved_at))
     if user_id:
-        remember_forward(sent, user_id, username)
+        remember_forward(sent, user_id, username, query_text)
 
 
 @bot.message_handler(func=lambda message: message.text and '#query' in message.text.lower() and message.message_thread_id == DISCUSSION_TOPIC)
@@ -218,7 +220,8 @@ def handle_doc_answer(message):
             if e.type == "text_mention" and e.user and e.user.id == entry["user_id"]:
                 return
     try:
-        bot.send_message(CHAT_ID, f"{mention(entry)} \U0001f64f Doc has answered your query \U0001f446",
+        head = (entry.get("tags", "") + " " + mention(entry)).strip()  # "#Kpittech @amitdelta19", Doc's own style
+        bot.send_message(CHAT_ID, f"{head} \U0001f64f Doc has answered your query \U0001f446",
                          message_thread_id=QUERY_TOPIC, reply_to_message_id=message.message_id, parse_mode="HTML")
         print(f"🔔 Tagged {entry['name']} under Doc's answer")
     except Exception as e:
