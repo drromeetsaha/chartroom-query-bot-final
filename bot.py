@@ -242,6 +242,10 @@ def handle_doc_answer(message):
 
 
 def answer_done(messages):
+    head = (next((m.text or m.caption for m in messages if m.text or m.caption), "") or "").strip().split("\n")[0][:120]
+    with lock:  # Doc's answers of the last 3 days, for the 3:30 PM check
+        db.setdefault("doc_heads", []).append([time.time(), head.lower()])
+        db["doc_heads"] = [h for h in db["doc_heads"] if h[0] > time.time() - 3 * 86400]
     key = next((str(m.reply_to_message.message_id) for m in messages
                 if m.reply_to_message and str(m.reply_to_message.message_id) in db["forwarded"]), None)
     if key is None:
@@ -338,6 +342,45 @@ def handle_offer_choice(call):
         print(f"❌ ERROR: {e}\n")
 
 
+def answered(e):
+    """Doc tagged them, the bot tagged them under his answer, or a later message of his names the member or the stock."""
+    if e.get("tagged"):
+        return True
+    name = e["name"].lstrip("@").lower()
+    stocks = _words(e.get("tags", ""))
+    for ts, head in db.get("doc_heads", []):
+        if ts < e["ts"]:
+            continue
+        if len(name) >= 3 and name in head:
+            return True
+        if any(a == b or len(min(a, b, key=len)) >= 4 and (a.startswith(b) or b.startswith(a)) for a in stocks for b in _words(head)):
+            return True
+    return False
+
+
+def remind_doc(now):
+    """3:30 PM on market days, only if a query from today is still without Doc's answer: a private note with links."""
+    today = now.strftime("%Y-%m-%d")
+    if not is_trading_day(now.date()) or now.hour * 60 + now.minute < WINDOW_END_MINUTES or db.get("reminded") == today:
+        return
+    with lock:
+        db["reminded"] = today
+        save_db()
+        missed = [(k, e) for k, e in db["forwarded"].items()
+                  if datetime.fromtimestamp(e["ts"], IST).strftime("%Y-%m-%d") == today and not answered(e)]
+    if not missed:
+        return
+    lines = [f'• <a href="https://t.me/c/{str(CHAT_ID)[4:]}/{QUERY_TOPIC}/{k}">{html.escape(e.get("tags") or "Query")} '
+             f'({html.escape(e["name"])})</a>' for k, e in sorted(missed, key=lambda x: x[1]["ts"])]
+    try:
+        bot.send_message(DOC_ID, f"\U0001f64f Doc, {len(missed)} {'query' if len(missed) == 1 else 'queries'} from today "
+                                 f"may still be waiting for your answer:\n" + "\n".join(lines),
+                         parse_mode="HTML", disable_web_page_preview=True)
+        print(f"🔔 Reminded Doc of {len(missed)} open queries")
+    except Exception as e:
+        print(f"❌ Could not send Doc the reminder (has he pressed Start in the bot's chat?): {e}")
+
+
 def housekeeping():
     """Every 20 s: forward saved queries that are due, and remove notes and offers whose time is up."""
     while True:
@@ -363,6 +406,7 @@ def housekeeping():
                     bot.delete_message(CHAT_ID, mid)
                 except Exception:
                     pass  # already deleted
+            remind_doc(get_current_ist())
         except Exception as e:
             print(f"❌ Housekeeping error: {e}")
         time.sleep(20)
