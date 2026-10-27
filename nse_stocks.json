@@ -2,11 +2,25 @@
 "source": "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
 "not_stocks": [
 "akash",
+"ankit",
+"dilip",
+"himadri",
+"manoj",
+"max",
+"mohit",
+"mukesh",
+"parag",
 "ppl",
 "rushil",
+"sagar",
 "shardul",
 "sonal",
-"sumit"
+"sumit",
+"suraj",
+"tejas",
+"utkarsh",
+"vaibhav",
+"vikram"
 ],
 "stocks": [
 {
@@ -1558,7 +1572,6 @@
 "symbol": "ankitmetal",
 "name": "ankit metal & power",
 "aliases": [
-"ankit",
 "ankit metal",
 "ankit metal & power",
 "ankitmetal"
@@ -5683,7 +5696,6 @@
 "name": "dilip buildcon",
 "aliases": [
 "dbl",
-"dilip",
 "dilip buildcon"
 ],
 "strict": []
@@ -10154,7 +10166,6 @@
 "symbol": "hscl",
 "name": "himadri speciality chemical",
 "aliases": [
-"himadri",
 "himadri speciality",
 "himadri speciality chemical",
 "hscl"
@@ -14571,13 +14582,10 @@
 "symbol": "maxind",
 "name": "max india",
 "aliases": [
-"max",
 "max india",
 "maxind"
 ],
-"strict": [
-"max"
-]
+"strict": []
 },
 {
 "symbol": "mayuruniq",
@@ -15199,7 +15207,6 @@
 "symbol": "mohitind",
 "name": "mohit industries",
 "aliases": [
-"mohit",
 "mohit industrie",
 "mohit industries",
 "mohitind"
@@ -15553,7 +15560,6 @@
 "symbol": "mukeshb",
 "name": "mukesh babu financial services",
 "aliases": [
-"mukesh",
 "mukesh babu",
 "mukesh babu financial service",
 "mukesh babu financial services",
@@ -15656,7 +15662,6 @@
 "symbol": "mvgjl",
 "name": "manoj vaibhav gems n jewellers",
 "aliases": [
-"manoj",
 "manoj vaibhav",
 "manoj vaibhav gems n jeweller",
 "manoj vaibhav gems n jewellers",
@@ -17322,7 +17327,6 @@
 "symbol": "paragmilk",
 "name": "parag milk foods",
 "aliases": [
-"parag",
 "parag milk",
 "parag milk food",
 "parag milk foods",
@@ -20011,7 +20015,6 @@
 "symbol": "sagcem",
 "name": "sagar cements",
 "aliases": [
-"sagar",
 "sagar cement",
 "sagar cements",
 "sagcem"
@@ -22916,7 +22919,6 @@
 "symbol": "surajltd",
 "name": "suraj",
 "aliases": [
-"suraj",
 "surajltd"
 ],
 "strict": []
@@ -23676,7 +23678,6 @@
 "symbol": "tejasnet",
 "name": "tejas networks",
 "aliases": [
-"tejas",
 "tejas network",
 "tejas networks",
 "tejasnet"
@@ -25033,7 +25034,6 @@
 "symbol": "utkarshbnk",
 "name": "utkarsh small finance bank",
 "aliases": [
-"utkarsh",
 "utkarsh small",
 "utkarsh small finance bank",
 "utkarshbnk"
@@ -25107,7 +25107,6 @@
 "symbol": "vaibhavgbl",
 "name": "vaibhav global",
 "aliases": [
-"vaibhav",
 "vaibhav global",
 "vaibhavgbl"
 ],
@@ -25519,7 +25518,6 @@
 "symbol": "vikramsolr",
 "name": "vikram solar",
 "aliases": [
-"vikram",
 "vikram solar",
 "vikramsolr"
 ],

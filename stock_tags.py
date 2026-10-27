@@ -39,10 +39,10 @@ def _load():
                 alias.setdefault(a.replace(" ", ""), st["symbol"])  # "kalyanjewellers"
         strict.update(st.get("strict", []))
     alias.update(EXTRA)
-    return alias, strict
+    return alias, strict, not_stocks
 
 
-ALIAS, STRICT = _load()
+ALIAS, STRICT, NOT_STOCKS = _load()  # NOT_STOCKS: member names that are also NSE short names ("suraj", "mukesh")
 _MULTI = sorted((a for a in ALIAS if " " in a), key=len, reverse=True)
 
 
@@ -76,6 +76,8 @@ def find_stocks(text, limit=3):
         # the member's own word for it ("botz", "rblx"), but only if it is the query's first word: a later word
         # is usually not a name at all ("BT.A again as seeing..." -> "again"), and no tag is better than a wrong one
         first = next((w for w in words if w not in SKIP), "")
+        if first in NOT_STOCKS:
+            first = ""  # "Suraj here, ...": a member's name, not a stock
         if len(first) >= 3 and not first.isdigit():
             found.append(first)
     return found[:limit]
