@@ -226,23 +226,56 @@ albums = {}  # album id -> Doc's messages in it; an album arrives as one message
 
 
 @bot.message_handler(content_types=["text", "photo", "document"],
-                     func=lambda m: m.message_thread_id == QUERY_TOPIC and m.from_user and m.from_user.id == DOC_ID
-                     and m.reply_to_message is not None)
+                     func=lambda m: m.message_thread_id == QUERY_TOPIC and m.from_user and m.from_user.id == DOC_ID)
 def handle_doc_answer(message):
-    """Doc replied under a forwarded query. If his answer doesn't tag the member, tag them under it, so they're
+    """Doc answered a forwarded query. If his answer doesn't tag the member, tag them under it, so they're
     notified that their query was answered (Doc then never has to type the "#Symbol @member" header)."""
-    key = str(message.reply_to_message.message_id)
-    if key not in db["forwarded"]:
-        return
     if message.media_group_id:
         # wait for the whole album (the caption may be on any photo), then tag once
         with lock:
             first = message.media_group_id not in albums
             albums.setdefault(message.media_group_id, []).append(message)
         if first:
-            threading.Timer(4, lambda g=message.media_group_id: tag_member(key, albums.pop(g, []))).start()
+            threading.Timer(4, lambda g=message.media_group_id: answer_done(albums.pop(g, []))).start()
         return
-    tag_member(key, [message])
+    answer_done([message])
+
+
+def answer_done(messages):
+    key = next((str(m.reply_to_message.message_id) for m in messages
+                if m.reply_to_message and str(m.reply_to_message.message_id) in db["forwarded"]), None)
+    if key is None:
+        key = open_query_for(messages)
+    if key:
+        tag_member(key, messages)
+
+
+def _words(text):
+    return {w.lower() for w in re.findall(r"#(\w+)", text or "")}
+
+
+def open_query_for(messages):
+    """Doc answered by replying to his old analysis, or without a reply ("#Groww Akash As per our last analysis...").
+    The open query (last 3 days, not yet tagged) whose stock tag or member name his first line names."""
+    text = next((m.text or m.caption for m in messages if m.text or m.caption), "") or ""
+    head = text.strip().split("\n")[0][:120].lower()
+    stocks = _words(head)
+    if not stocks:  # no "#Stock" of his own: take it from the old analysis he replied under
+        r = next((m.reply_to_message for m in messages if m.reply_to_message), None)
+        stocks = _words(((r.text or r.caption or "") if r else "").split("\n")[0])
+    cut = time.time() - 3 * 86400
+    by_name, by_stock = [], []
+    for key, e in db["forwarded"].items():
+        if e.get("tagged") or e["ts"] < cut:
+            continue
+        name = e["name"].lstrip("@").lower()
+        if len(name) >= 3 and re.search(r"(?<!\w)@?" + re.escape(name) + r"(?!\w)", head):
+            by_name.append(key)
+        elif any(a == b or len(min(a, b, key=len)) >= 4 and (a.startswith(b) or b.startswith(a))
+                 for a in _words(e.get("tags", "")) for b in stocks):
+            by_stock.append(key)  # "#Bajajhind" and a query tagged "#Bajajhindustansugar"
+    found = by_name if by_name else by_stock
+    return found[0] if len(found) == 1 else None
 
 
 def tag_member(key, messages):
