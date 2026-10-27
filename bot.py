@@ -1,4 +1,5 @@
 import os
+import html
 import json
 import time
 import threading
@@ -11,6 +12,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]  # set in Railway Variables
 bot = telebot.TeleBot(BOT_TOKEN)
 
 CHAT_ID = -1002599963619
+DOC_ID = 570458138
 DISCUSSION_TOPIC = 20972
 QUERY_TOPIC = 5210
 
@@ -42,6 +44,7 @@ def load_db():
         data = {}
     data.setdefault("user_queries", {})
     data.setdefault("saved", [])
+    data.setdefault("forwarded", {})  # forwarded message id -> who asked, so Doc's reply can tag them
     return data
 
 
@@ -114,12 +117,23 @@ def send_note(message, text, lifetime=NOTE_LIFETIME, markup=None):
     return sent
 
 
-def forward_query(username, query_text, saved_at=None):
+def remember_forward(sent, user_id, username):
+    """Keeps who asked each forwarded query for 30 days, so the member can be tagged under Doc's reply."""
+    with lock:
+        db["forwarded"][str(sent.message_id)] = {"user_id": user_id, "name": username, "ts": time.time()}
+        cut = time.time() - 30 * 86400
+        db["forwarded"] = {k: v for k, v in db["forwarded"].items() if v["ts"] > cut}
+        save_db()
+
+
+def forward_query(username, query_text, saved_at=None, user_id=None):
     text = f"📌 Query from {username}\n\n{query_text}"
     if saved_at:
         text += f"\n\n(saved on {saved_at})"
     # saved queries go out at midnight, so they arrive silently
-    bot.send_message(CHAT_ID, text, message_thread_id=QUERY_TOPIC, disable_notification=bool(saved_at))
+    sent = bot.send_message(CHAT_ID, text, message_thread_id=QUERY_TOPIC, disable_notification=bool(saved_at))
+    if user_id:
+        remember_forward(sent, user_id, username)
 
 
 @bot.message_handler(func=lambda message: message.text and '#query' in message.text.lower() and message.message_thread_id == DISCUSSION_TOPIC)
@@ -156,7 +170,7 @@ def handle_query(message):
             print(f"⚠️ Weekly limit reached for {username}")
             return
         if open_now:
-            bot.send_message(CHAT_ID, f"📌 Query from {username}\n\n{query_text}", message_thread_id=QUERY_TOPIC)
+            forward_query(username, query_text, user_id=user_id)
             # Record only after a successful forward, so a failed send doesn't use up the weekly query
             with lock:
                 record_query(user_id, week)
@@ -177,6 +191,38 @@ def handle_query(message):
         print(f"🕒 Outside window - offered to save query from {username}")
     except Exception as e:
         print(f"❌ ERROR: {e}\n")
+
+
+def mention(entry):
+    """'@username' for members with one; otherwise a name link that still notifies them."""
+    name = entry["name"]
+    if name.startswith("@"):
+        return name
+    return f'<a href="tg://user?id={entry["user_id"]}">{html.escape(name)}</a>'
+
+
+@bot.message_handler(content_types=["text", "photo", "document"],
+                     func=lambda m: m.message_thread_id == QUERY_TOPIC and m.from_user and m.from_user.id == DOC_ID
+                     and m.reply_to_message is not None)
+def handle_doc_answer(message):
+    """Doc replied under a forwarded query. If his answer doesn't tag the member, tag them under it, so they're
+    notified that their query was answered (Doc then never has to type the "#Symbol @member" header)."""
+    entry = db["forwarded"].get(str(message.reply_to_message.message_id))
+    if not entry:
+        return
+    answer = (message.text or message.caption or "").lower()
+    if entry["name"].startswith("@") and entry["name"].lower() in answer:
+        return  # Doc already tagged them
+    if message.entities or message.caption_entities:
+        for e in (message.entities or message.caption_entities or []):
+            if e.type == "text_mention" and e.user and e.user.id == entry["user_id"]:
+                return
+    try:
+        bot.send_message(CHAT_ID, f"{mention(entry)} \U0001f64f Doc has answered your query \U0001f446",
+                         message_thread_id=QUERY_TOPIC, reply_to_message_id=message.message_id, parse_mode="HTML")
+        print(f"🔔 Tagged {entry['name']} under Doc's answer")
+    except Exception as e:
+        print(f"❌ Could not tag under Doc's answer: {e}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("qsave", "qskip"))
@@ -228,7 +274,7 @@ def housekeeping():
             for s in due:
                 # queries saved before 27 Oct stored the bare name and were always shown with "@"
                 name = s["username"] if s.get("display") else f"@{s['username']}"
-                forward_query(name, s["text"], saved_at=s["asked"])
+                forward_query(name, s["text"], saved_at=s["asked"], user_id=s.get("user_id"))
                 with lock:
                     s["sent"] = True
                     db["saved"] = [x for x in db["saved"] if not x.get("sent") or now_ts - x["target"] < 7 * 86400]
