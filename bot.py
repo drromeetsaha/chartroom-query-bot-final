@@ -115,7 +115,7 @@ def send_note(message, text, lifetime=NOTE_LIFETIME, markup=None):
 
 
 def forward_query(username, query_text, saved_at=None):
-    text = f"📌 Query from @{username}\n\n{query_text}"
+    text = f"📌 Query from {username}\n\n{query_text}"
     if saved_at:
         text += f"\n\n(saved on {saved_at})"
     # saved queries go out at midnight, so they arrive silently
@@ -125,11 +125,12 @@ def forward_query(username, query_text, saved_at=None):
 @bot.message_handler(func=lambda message: message.text and '#query' in message.text.lower() and message.message_thread_id == DISCUSSION_TOPIC)
 def handle_query(message):
     user_id = message.from_user.id
-    username = message.from_user.username or message.from_user.first_name
+    # "@username" when the member has one; otherwise their first name (an "@Ravi" would tag nobody)
+    username = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "a member")
     now = get_current_ist()
     query_text = message.text.replace("#query", "").replace("#Query", "").replace("#QUERY", "").strip()
 
-    print(f"\n🔍 Caught #query from @{username}")
+    print(f"\n🔍 Caught #query from {username}")
 
     open_now = in_query_window(now)
     target = now if open_now else next_window_start(now)
@@ -152,10 +153,10 @@ def handle_query(message):
         if used_week:
             send_note(message, "🙏 You've already used this week's query. Your next one opens on Monday.\n"
                                "Meanwhile, #view stockname shows Doc's latest views.")
-            print(f"⚠️ Weekly limit reached for @{username}")
+            print(f"⚠️ Weekly limit reached for {username}")
             return
         if open_now:
-            bot.send_message(CHAT_ID, f"📌 Query from @{username}\n\n{query_text}", message_thread_id=QUERY_TOPIC)
+            bot.send_message(CHAT_ID, f"📌 Query from {username}\n\n{query_text}", message_thread_id=QUERY_TOPIC)
             # Record only after a successful forward, so a failed send doesn't use up the weekly query
             with lock:
                 record_query(user_id, week)
@@ -173,7 +174,7 @@ def handle_query(message):
         with lock:
             offers[offer.message_id] = {"user_id": user_id, "username": username, "text": query_text,
                                         "target": target.timestamp(), "asked": now.strftime("%d %b, %I:%M %p")}
-        print(f"🕒 Outside window - offered to save query from @{username}")
+        print(f"🕒 Outside window - offered to save query from {username}")
     except Exception as e:
         print(f"❌ ERROR: {e}\n")
 
@@ -203,14 +204,14 @@ def handle_offer_choice(call):
                 text = "🙏 You've already used that week's query, so this one can't be saved."
             else:
                 record_query(offer["user_id"], week)
-                db["saved"].append({"user_id": offer["user_id"], "username": offer["username"], "text": offer["text"],
+                db["saved"].append({"user_id": offer["user_id"], "username": offer["username"], "display": True, "text": offer["text"],
                                     "target": offer["target"], "asked": offer["asked"], "sent": False})
                 save_db()
                 text = f"✅ Done! Your query will be forwarded to Doc at {when_text(target, get_current_ist())}."
             deletions.append((time.time() + NOTE_LIFETIME, offer_id))
         bot.answer_callback_query(call.id)
         bot.edit_message_text(text, CHAT_ID, offer_id)
-        print(f"💾 Query from @{offer['username']}: {text}")
+        print(f"💾 Query from {offer['username']}: {text}")
     except Exception as e:
         print(f"❌ ERROR: {e}\n")
 
@@ -225,7 +226,9 @@ def housekeeping():
                 to_delete = {mid for t, mid in deletions if t <= now_ts}
                 deletions[:] = [(t, mid) for t, mid in deletions if t > now_ts]
             for s in due:
-                forward_query(s["username"], s["text"], saved_at=s["asked"])
+                # queries saved before 27 Oct stored the bare name and were always shown with "@"
+                name = s["username"] if s.get("display") else f"@{s['username']}"
+                forward_query(name, s["text"], saved_at=s["asked"])
                 with lock:
                     s["sent"] = True
                     db["saved"] = [x for x in db["saved"] if not x.get("sent") or now_ts - x["target"] < 7 * 86400]
