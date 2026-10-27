@@ -222,26 +222,47 @@ def mention(entry):
     return f'<a href="tg://user?id={entry["user_id"]}">{html.escape(name)}</a>'
 
 
+albums = {}  # album id -> Doc's messages in it; an album arrives as one message per photo
+
+
 @bot.message_handler(content_types=["text", "photo", "document"],
                      func=lambda m: m.message_thread_id == QUERY_TOPIC and m.from_user and m.from_user.id == DOC_ID
                      and m.reply_to_message is not None)
 def handle_doc_answer(message):
     """Doc replied under a forwarded query. If his answer doesn't tag the member, tag them under it, so they're
     notified that their query was answered (Doc then never has to type the "#Symbol @member" header)."""
-    entry = db["forwarded"].get(str(message.reply_to_message.message_id))
-    if not entry:
+    key = str(message.reply_to_message.message_id)
+    if key not in db["forwarded"]:
         return
-    answer = (message.text or message.caption or "").lower()
-    if entry["name"].startswith("@") and entry["name"].lower() in answer:
-        return  # Doc already tagged them
-    if message.entities or message.caption_entities:
+    if message.media_group_id:
+        # wait for the whole album (the caption may be on any photo), then tag once
+        with lock:
+            first = message.media_group_id not in albums
+            albums.setdefault(message.media_group_id, []).append(message)
+        if first:
+            threading.Timer(4, lambda g=message.media_group_id: tag_member(key, albums.pop(g, []))).start()
+        return
+    tag_member(key, [message])
+
+
+def tag_member(key, messages):
+    with lock:
+        entry = db["forwarded"].get(key)
+        if not entry or entry.get("tagged") or not messages:
+            return  # tagged once per query, even if Doc answers in several messages
+        entry["tagged"] = True
+        save_db()
+    for message in messages:
+        answer = (message.text or message.caption or "").lower()
+        if entry["name"].startswith("@") and entry["name"].lower() in answer:
+            return  # Doc already tagged them
         for e in (message.entities or message.caption_entities or []):
             if e.type == "text_mention" and e.user and e.user.id == entry["user_id"]:
                 return
     try:
         head = (entry.get("tags", "") + " " + mention(entry)).strip()  # "#Kpittech @amitdelta19", Doc's own style
         bot.send_message(CHAT_ID, f"{head} \U0001f64f Doc has answered your query \U0001f446",
-                         message_thread_id=QUERY_TOPIC, reply_to_message_id=message.message_id, parse_mode="HTML")
+                         message_thread_id=QUERY_TOPIC, reply_to_message_id=messages[0].message_id, parse_mode="HTML")
         print(f"🔔 Tagged {entry['name']} under Doc's answer")
     except Exception as e:
         print(f"❌ Could not tag under Doc's answer: {e}")

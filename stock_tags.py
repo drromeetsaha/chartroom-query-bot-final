@@ -19,7 +19,7 @@ EXTRA = {  # not NSE companies, or names members use that the list doesn't have
     "icici pru": "icicipruli", "icici pru life": "icicipruli", "icici prudential": "icicipruli", "icici lombard": "icicigi",
     "shree refrigeration": "shreeref", "shree refrigerations": "shreeref",
 }
-SKIP = {"query", "doc", "sir", "pls", "please", "view", "views", "latest", "update", "chart", "for", "the", "and",
+SKIP = {"query", "doc", "sir", "pls", "please", "view", "views", "latest", "update", "updated", "chart", "for", "the", "and",
         "long", "short", "term", "target", "targets", "hold", "buy", "sell", "on", "in", "of", "me", "is", "it", "my",
         # Hindi/Hinglish words that are also NSE symbols ("crude oil par thoda long term view")
         "kya", "hai", "par", "pe", "ka", "ki", "ke", "ko", "se", "mein", "bhi", "aur", "nahi", "abhi", "aaj", "kal",
@@ -73,8 +73,10 @@ def find_stocks(text, limit=3):
         if sym not in found:
             found.append(sym)
     if not found:
-        first = next((w for w in words if w not in SKIP and len(w) >= 3 and not w.isdigit()), None)
-        if first:
+        # the member's own word for it ("botz", "rblx"), but only if it is the query's first word: a later word
+        # is usually not a name at all ("BT.A again as seeing..." -> "again"), and no tag is better than a wrong one
+        first = next((w for w in words if w not in SKIP), "")
+        if len(first) >= 3 and not first.isdigit():
             found.append(first)
     return found[:limit]
 
