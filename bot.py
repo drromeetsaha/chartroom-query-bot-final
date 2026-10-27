@@ -183,11 +183,11 @@ def handle_query(message):
             day = datetime.fromtimestamp(saved["target"], IST)
             day = f"tomorrow ({day.strftime('%A')})" if day.date() == now.date() + timedelta(days=1) else day.strftime("%A")
             send_note(message, f"🙏 You've already saved one query ({what}) for {day}. "
-                               f"It's 1 query per week, so this one can't be added.")
+                               f"As it's 1 query per week, this one can't be added, sorry. Thank you for understanding!")
             return
         if used_week:
-            send_note(message, "🙏 You've already used this week's query. Your next one opens on Monday.\n"
-                               "Meanwhile, #view stockname shows Doc's latest views.")
+            send_note(message, "🙏 Sorry, you've already used this week's query. Your next one opens on Monday.\n"
+                               "Meanwhile, #view stockname shows Doc's latest views. Thank you for understanding!")
             print(f"⚠️ Weekly limit reached for {username}")
             return
         if open_now:
@@ -311,10 +311,10 @@ def handle_offer_choice(call):
     with lock:
         offer = offers.get(offer_id)
     if not offer:
-        bot.answer_callback_query(call.id, "This option has expired.")
+        bot.answer_callback_query(call.id, "🙏 Sorry, this option has expired. Please post your #query again.")
         return
     if call.from_user.id != offer["user_id"]:
-        bot.answer_callback_query(call.id, "🙏 Only the member who asked can choose this.")
+        bot.answer_callback_query(call.id, "🙏 Sorry, only the member who asked can choose this one.")
         return
     with lock:
         offers.pop(offer_id, None)
@@ -327,13 +327,13 @@ def handle_offer_choice(call):
         week = week_start_of(target)
         with lock:
             if has_query_in_week(offer["user_id"], week):
-                text = "🙏 You've already used that week's query, so this one can't be saved."
+                text = "🙏 Sorry, you've already used that week's query, so this one can't be saved. Thank you for understanding!"
             else:
                 record_query(offer["user_id"], week)
                 db["saved"].append({"user_id": offer["user_id"], "username": offer["username"], "display": True, "text": offer["text"],
                                     "target": offer["target"], "asked": offer["asked"], "sent": False})
                 save_db()
-                text = f"✅ Done! Your query will be forwarded to Doc at {when_text(target, get_current_ist())}."
+                text = f"✅ Done! Your query will be forwarded to Doc at {when_text(target, get_current_ist())}. Thank you 🙏"
             deletions.append((time.time() + NOTE_LIFETIME, offer_id))
         bot.answer_callback_query(call.id)
         bot.edit_message_text(text, CHAT_ID, offer_id)
