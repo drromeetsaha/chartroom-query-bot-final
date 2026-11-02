@@ -8,7 +8,7 @@ import telebot
 from telebot import types
 from datetime import datetime, timedelta
 import pytz
-from stock_tags import tags as stock_tags
+from stock_tags import tags as stock_tags, find_stocks
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]  # set in Railway Variables
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -99,6 +99,24 @@ def record_query(user_id, week_start):
     save_db()
 
 
+def asked_in_week(user_id, week_start):
+    """What the member asked in that week's forwarded queries, for the limit note: "LTF", "LTF and TCS"."""
+    names = []
+    for e in sorted(db["forwarded"].values(), key=lambda e: e["ts"]):
+        if e["user_id"] != user_id or week_start_of(datetime.fromtimestamp(e["ts"], IST)) != week_start:
+            continue
+        what = e.get("stocks") or [t.upper() for t in _words(e.get("tags", ""))] or ([e["text"]] if e.get("text") else [])
+        names += [w for w in what if w not in names]
+    return " and ".join(names[:3])
+
+
+def used_note(user_id, week_start, which="this week's"):
+    asked = asked_in_week(user_id, week_start)
+    if asked:
+        return f"🙏 Sorry, {which} query has already been used for {asked}."
+    return f"🙏 Sorry, you've already used {which} query."
+
+
 def when_text(target, now):
     if target.date() == now.date() + timedelta(days=1):
         return f"12:00 AM tomorrow ({target.strftime('%A')})"
@@ -122,19 +140,25 @@ def send_note(message, text, lifetime=NOTE_LIFETIME, markup=None):
 def remember_forward(sent, user_id, username, query_text=""):
     """Keeps who asked each forwarded query (and which stock) for 30 days, so the member can be tagged under Doc's reply."""
     with lock:
+        what = " ".join(query_text.split())
         db["forwarded"][str(sent.message_id)] = {"user_id": user_id, "name": username, "ts": time.time(),
-                                                 "tags": stock_tags(query_text)}
+                                                 "tags": stock_tags(query_text),
+                                                 "stocks": [s.upper() for s in find_stocks(query_text)],
+                                                 "text": (what[:30].rstrip() + "…") if len(what) > 30 else what}
         cut = time.time() - 30 * 86400
         db["forwarded"] = {k: v for k, v in db["forwarded"].items() if v["ts"] > cut}
         save_db()
 
 
-def forward_query(username, query_text, saved_at=None, user_id=None):
-    text = f"📌 Query from {username}\n\n{query_text}"
+def forward_query(username, query_text, saved_at=None, user_id=None, photo=None):
+    text = f"📌 Query from {username}\n\n{query_text}".strip()
     if saved_at:
         text += f"\n\n(saved on {saved_at})"
     # saved queries go out at midnight, so they arrive silently
-    sent = bot.send_message(CHAT_ID, text, message_thread_id=QUERY_TOPIC, disable_notification=bool(saved_at))
+    if photo:  # a chart the member posted, sent on by Doc with /forward
+        sent = bot.send_photo(CHAT_ID, photo, caption=text[:1024], message_thread_id=QUERY_TOPIC)
+    else:
+        sent = bot.send_message(CHAT_ID, text, message_thread_id=QUERY_TOPIC, disable_notification=bool(saved_at))
     if user_id:
         remember_forward(sent, user_id, username, query_text)
 
@@ -142,6 +166,11 @@ def forward_query(username, query_text, saved_at=None, user_id=None):
 # "#query" used as advice, not as a query: "Pls use #query stock name", "Try #query mcx", "#query krke dalo"
 INSTRUCTION_RE = re.compile(r"\b(use|try|post|ask|pls|please|plz|via|through|bhejo|dalo|daalo)\s+(?:in\s+|at\s+|on\s+|it\s+)?#query\b"
                             r"|#query\s+(?:karo|kro|krke|karke|kar\s+ke|kar\s+do|me|mein|pe|topic)\b", re.I)
+
+
+def display_name(user):
+    """"@username" when the member has one; otherwise their first name (an "@Ravi" would tag nobody)."""
+    return f"@{user.username}" if user.username else (user.first_name or "a member")
 
 
 def is_real_query(message):
@@ -160,8 +189,7 @@ def is_real_query(message):
                      and message.message_thread_id == DISCUSSION_TOPIC and is_real_query(message))
 def handle_query(message):
     user_id = message.from_user.id
-    # "@username" when the member has one; otherwise their first name (an "@Ravi" would tag nobody)
-    username = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "a member")
+    username = display_name(message.from_user)
     now = get_current_ist()
     query_text = message.text.replace("#query", "").replace("#Query", "").replace("#QUERY", "").strip()
 
@@ -186,7 +214,7 @@ def handle_query(message):
                                f"As it's 1 query per week, this one can't be added, sorry. Thank you for understanding!")
             return
         if used_week:
-            send_note(message, "🙏 Sorry, you've already used this week's query. Your next one opens on Monday.\n"
+            send_note(message, used_note(user_id, week) + " Your next one opens on Monday.\n"
                                "Meanwhile, #view stockname shows Doc's latest views. Thank you for understanding!")
             print(f"⚠️ Weekly limit reached for {username}")
             return
@@ -212,6 +240,57 @@ def handle_query(message):
         print(f"🕒 Outside window - offered to save query from {username}")
     except Exception as e:
         print(f"❌ ERROR: {e}\n")
+
+
+DOC_FORWARD_STRIP = re.compile(r"@romeetsaha\b|#query\b", re.I)
+
+
+@bot.message_handler(commands=["forward"])
+def forward_for_member(message):
+    """Doc replies /forward to a member's message: it goes to the Query topic as that member's query, with no limit
+    (even if they've used this week's), and counts as their query for the week. "/forward tao usdt" uses his words."""
+    if not message.from_user or message.from_user.id != DOC_ID or message.chat.id != CHAT_ID:
+        return
+    try:
+        bot.delete_message(CHAT_ID, message.message_id)  # keep the topic clean
+    except Exception:
+        pass
+    asked = message.reply_to_message
+    if (asked is None or asked.message_id == message.message_thread_id or not asked.from_user
+            or asked.from_user.is_bot or asked.from_user.id == DOC_ID):
+        doc_note(message, "🙏 Doc, please send /forward as a reply to the member's message.")
+        return
+    parts = (message.text or "").split(None, 1)
+    query_text = parts[1] if len(parts) > 1 else (asked.text or asked.caption or "")
+    query_text = "\n".join(" ".join(line.split()) for line in DOC_FORWARD_STRIP.sub(" ", query_text).split("\n")).strip()
+    photo = asked.photo[-1].file_id if asked.photo else None
+    if not query_text and not photo:
+        doc_note(message, "🙏 Doc, that message has no text. Please send /forward followed by the stock name.")
+        return
+    user_id = asked.from_user.id
+    username = display_name(asked.from_user)
+    try:
+        forward_query(username, query_text, user_id=user_id, photo=photo)
+        with lock:
+            record_query(user_id, week_start_of(get_current_ist()))
+        sent = bot.send_message(CHAT_ID, "✅ Doc has forwarded your query to the Query topic 🙏",
+                                message_thread_id=message.message_thread_id, reply_to_message_id=asked.message_id)
+        with lock:
+            deletions.append((time.time() + OFFER_LIFETIME, sent.message_id))
+        print(f"📨 Doc forwarded a query from {username}")
+    except Exception as e:
+        print(f"❌ Could not forward for Doc: {e}")
+        doc_note(message, "🙏 Doc, sorry, I couldn't forward that one. Please try again.")
+
+
+def doc_note(message, text):
+    """A short note to Doc in the topic he used; it deletes itself after a minute."""
+    try:
+        sent = bot.send_message(CHAT_ID, text, message_thread_id=message.message_thread_id)
+        with lock:
+            deletions.append((time.time() + NOTE_LIFETIME, sent.message_id))
+    except Exception as e:
+        print(f"❌ Could not send Doc a note: {e}")
 
 
 def mention(entry):
@@ -327,7 +406,8 @@ def handle_offer_choice(call):
         week = week_start_of(target)
         with lock:
             if has_query_in_week(offer["user_id"], week):
-                text = "🙏 Sorry, you've already used that week's query, so this one can't be saved. Thank you for understanding!"
+                text = (used_note(offer["user_id"], week, "that week's").rstrip(".")
+                        + ", so this one can't be saved. Thank you for understanding!")
             else:
                 record_query(offer["user_id"], week)
                 db["saved"].append({"user_id": offer["user_id"], "username": offer["username"], "display": True, "text": offer["text"],
@@ -435,6 +515,11 @@ def main():
     print(f"Market Days Only (Mon-Fri, excluding NSE holidays); late queries can be saved for the next window")
     print(f"DB file: {DB_FILE} ({len(db['user_queries'])} members, {len([s for s in db['saved'] if not s.get('sent')])} saved queries)")
     print("="*60)
+    try:  # "/forward" in Doc's command menu in the group only; members don't see it
+        bot.set_my_commands([types.BotCommand("forward", "Reply to a member's message to forward it as their query")],
+                            scope=types.BotCommandScopeChatMember(CHAT_ID, DOC_ID))
+    except Exception as e:
+        print(f"⚠️ Could not set Doc's command menu: {e}")
     threading.Thread(target=housekeeping, daemon=True).start()
     bot.remove_webhook()
     bot.infinity_polling(allowed_updates=["message", "callback_query"])

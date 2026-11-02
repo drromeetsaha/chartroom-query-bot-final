@@ -23,7 +23,9 @@ SKIP = {"query", "doc", "sir", "pls", "please", "view", "views", "latest", "upda
         "long", "short", "term", "target", "targets", "hold", "buy", "sell", "on", "in", "of", "me", "is", "it", "my",
         # Hindi/Hinglish words that are also NSE symbols ("crude oil par thoda long term view")
         "kya", "hai", "par", "pe", "ka", "ki", "ke", "ko", "se", "mein", "bhi", "aur", "nahi", "abhi", "aaj", "kal",
-        "thoda", "sab", "ab", "jo", "yeh", "ye", "wo", "kaise", "kab", "tak", "liye", "wala", "wali", "ek", "do"}
+        "thoda", "sab", "ab", "jo", "yeh", "ye", "wo", "kaise", "kab", "tak", "liye", "wala", "wali", "ek", "do",
+        # greetings before the stock ("bhaiya ji Tao/usdt ka view")
+        "bhaiya", "bhaiyaji", "ji"}
 
 
 def _load():
