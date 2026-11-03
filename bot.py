@@ -147,6 +147,8 @@ def remember_forward(sent, user_id, username, query_text=""):
                                                  "text": (what[:30].rstrip() + "…") if len(what) > 30 else what}
         cut = time.time() - 30 * 86400
         db["forwarded"] = {k: v for k, v in db["forwarded"].items() if v["ts"] > cut}
+        a = db.setdefault("activity", {}).setdefault(str(user_id), {})
+        a["q"] = a.get("q", 0) + 1  # queries forwarded, for the note when a member leaves
         save_db()
 
 
@@ -487,9 +489,125 @@ def housekeeping():
                 except Exception:
                     pass  # already deleted
             remind_doc(get_current_ist())
+            report_leavers(get_current_ist())
         except Exception as e:
             print(f"❌ Housekeeping error: {e}")
         time.sleep(20)
+
+
+# --- Members who leave (Doc, 3 Nov): a daily list for him, so he can send them a renewal link ---------------
+COSMOFEED_BOT = 5261821877   # SuperProfile's bot removes members whose plan has ended
+LEAVERS_AT = 20 * 60         # the day's list goes to Doc at 8:00 PM IST (every day: plans end on weekends too)
+IN_GROUP = ("member", "administrator", "creator")
+
+
+def note_activity(messages):
+    """Sees every group message before the handlers: who wrote in Discussion, and when they were last active."""
+    changed = False
+    for m in messages:
+        if m.chat.id != CHAT_ID or not m.from_user or m.from_user.is_bot or m.from_user.id == DOC_ID:
+            continue
+        with lock:
+            a = db.setdefault("activity", {}).setdefault(str(m.from_user.id), {})
+            if m.message_thread_id == DISCUSSION_TOPIC:
+                a["d"] = a.get("d", 0) + 1
+            a["last"] = datetime.fromtimestamp(m.date, IST).strftime("%Y-%m-%d")
+        changed = True
+    if changed:
+        with lock:
+            save_db()
+
+
+def is_in(member):
+    return member.status in IN_GROUP or (member.status == "restricted" and member.is_member)
+
+
+@bot.chat_member_handler(func=lambda u: u.chat.id == CHAT_ID)
+def member_changed(update):
+    """Telegram tells the bot (an admin) whenever someone leaves, is removed, or joins."""
+    user = update.new_chat_member.user
+    if user.is_bot:
+        return
+    was_in, now_in = is_in(update.old_chat_member), is_in(update.new_chat_member)
+    now = time.time()
+    with lock:
+        left = db.setdefault("left", [])
+        if was_in and not now_in:
+            by = update.from_user.id if update.from_user else user.id
+            how = "plan ended" if by == COSMOFEED_BOT else "left on their own" if by == user.id else "removed by an admin"
+            left.append({"user_id": user.id, "username": user.username or "",
+                         "name": " ".join(filter(None, [user.first_name, user.last_name])), "ts": now, "how": how})
+            print(f"👋 {display_name(user)} left the group ({how})")
+        elif now_in and not was_in:
+            back = [e for e in left if e["user_id"] == user.id and not e.get("back")]
+            for e in back:
+                e["back"] = now
+            if back:
+                print(f"🎉 {display_name(user)} came back")
+        else:
+            return
+        db["left"] = [e for e in left if now - e["ts"] < 90 * 86400]
+        save_db()
+
+
+def leaver_line(e):
+    who = (f'<a href="https://t.me/{e["username"]}">@{html.escape(e["username"])}</a>' if e["username"]
+           else f'<a href="tg://user?id={e["user_id"]}">{html.escape(e["name"] or "a member")}</a>')
+    a = db.get("activity", {}).get(str(e["user_id"]), {})
+    seen = [f"{a['q']} {'query' if a['q'] == 1 else 'queries'}" if a.get("q") else "",
+            f"{a['d']} Discussion msg{'s' if a['d'] != 1 else ''}" if a.get("d") else "",
+            f"last active {datetime.strptime(a['last'], '%Y-%m-%d').strftime('%-d %b')}" if a.get("last") else ""]
+    seen = " · ".join(s for s in seen if s)
+    return f"• {who} ({e['how']})" + (f" · {seen}" if seen else "")
+
+
+def leavers_text(entries, title):
+    gone = [e for e in entries if not e.get("back")]
+    back = [e for e in entries if e.get("back")]
+    lines = [title] + [leaver_line(e) for e in sorted(gone, key=lambda e: -e["ts"])]
+    if back:
+        lines.append("\n🎉 Already back: " + ", ".join(
+            f'@{html.escape(e["username"])}' if e["username"] else html.escape(e["name"] or "a member") for e in back))
+    if gone:
+        lines.append("\nTap a name to open their chat.")
+    return "\n".join(lines)
+
+
+def report_leavers(now):
+    """8:00 PM IST: the members who left since the last list (nothing is sent if nobody left)."""
+    today = now.strftime("%Y-%m-%d")
+    if now.hour * 60 + now.minute < LEAVERS_AT or db.get("leavers_sent") == today:
+        return
+    with lock:
+        db["leavers_sent"] = today
+        new = [e for e in db.get("left", []) if not e.get("reported")]
+        for e in new:
+            e["reported"] = today
+        save_db()
+    if not new:
+        return
+    gone = sum(1 for e in new if not e.get("back"))
+    title = (f"\U0001f64f Doc, {gone} {'member' if gone == 1 else 'members'} left the group today:" if gone
+             else "\U0001f64f Doc, nobody is missing today:")
+    try:
+        bot.send_message(DOC_ID, leavers_text(new, title), parse_mode="HTML", disable_web_page_preview=True)
+        print(f"🔔 Sent Doc today's leavers ({gone})")
+    except Exception as e:
+        print(f"❌ Could not send Doc the leavers list: {e}")
+
+
+@bot.message_handler(commands=["left"], func=lambda m: m.chat.type == "private" and m.from_user.id == DOC_ID)
+def left_lately(message):
+    """/left [days]: Doc's list of members who left in the last N days (default 7)."""
+    parts = message.text.split()
+    days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 7
+    entries = [e for e in db.get("left", []) if time.time() - e["ts"] < days * 86400]
+    if not entries:
+        bot.reply_to(message, f"🙏 Nobody has left in the last {days} days.")
+        return
+    gone = sum(1 for e in entries if not e.get("back"))
+    bot.reply_to(message, leavers_text(entries, f"🙏 {gone} left in the last {days} days:"),
+                 parse_mode="HTML", disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=['start'])
@@ -520,9 +638,20 @@ def main():
                             scope=types.BotCommandScopeChatMember(CHAT_ID, DOC_ID))
     except Exception as e:
         print(f"⚠️ Could not set Doc's command menu: {e}")
+    try:  # "/left" in Doc's private chat with the bot
+        bot.set_my_commands([types.BotCommand("left", "Members who left lately (add days, e.g. /left 30)")],
+                            scope=types.BotCommandScopeChat(DOC_ID))
+    except Exception as e:
+        print(f"⚠️ Could not set Doc's private command menu: {e}")
+    try:  # Telegram only tells admin bots when members leave
+        print(f"Leaver tracking: bot is {bot.get_chat_member(CHAT_ID, bot.get_me().id).status} in the group "
+              f"({len(db.get('left', []))} leavers kept, {len(db.get('activity', {}))} members with activity)")
+    except Exception as e:
+        print(f"⚠️ Could not check the bot's admin status: {e}")
+    bot.set_update_listener(note_activity)
     threading.Thread(target=housekeeping, daemon=True).start()
     bot.remove_webhook()
-    bot.infinity_polling(allowed_updates=["message", "callback_query"])
+    bot.infinity_polling(allowed_updates=["message", "callback_query", "chat_member"])
 
 
 if __name__ == "__main__":
