@@ -497,7 +497,7 @@ def housekeeping():
 
 # --- Members who leave (Doc, 3 Nov): a daily list for him, so he can send them a renewal link ---------------
 COSMOFEED_BOT = 5261821877   # SuperProfile's bot removes members whose plan has ended
-LEAVERS_AT = 20 * 60         # the day's list goes to Doc at 8:00 PM IST (every day: plans end on weekends too)
+LEAVERS_AT = 16 * 60 + 45    # the day's list goes to Doc at 4:45 PM IST (every day: plans end on weekends too)
 IN_GROUP = ("member", "administrator", "creator")
 
 
@@ -574,7 +574,7 @@ def leavers_text(entries, title):
 
 
 def report_leavers(now):
-    """8:00 PM IST: the members who left since the last list (nothing is sent if nobody left)."""
+    """4:45 PM IST: the members who left since the last list (nothing is sent if nobody left)."""
     today = now.strftime("%Y-%m-%d")
     if now.hour * 60 + now.minute < LEAVERS_AT or db.get("leavers_sent") == today:
         return
